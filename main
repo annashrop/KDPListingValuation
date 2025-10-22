@@ -1,0 +1,381 @@
+import React, { useMemo, useState, useEffect } from "react";
+
+// KDP Listing Grader – Single‑File React Component
+// Notes:
+// - Paste a listing URL and basic metrics; the app computes suggested multiple, fair price, ROI, and a grade.
+// - No scraping occurs (CORS & TOS). You can add a server later (Puppeteer/Playwright) if you want auto‑parsing.
+// - Data persists to localStorage so you can compare multiple listings.
+
+export default function App() {
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 px-5 py-10">
+      <div className="mx-auto max-w-6xl">
+        <Header />
+        <div className="grid md:grid-cols-3 gap-6 mt-6">
+          <div className="md:col-span-2"><ValuatorCard /></div>
+          <div className="md:col-span-1"><SavedComparisons /></div>
+        </div>
+        <Footer />
+      </div>
+    </div>
+  );
+}
+
+function Header(){
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <h1 className="text-2xl md:text-3xl font-bold tracking-tight">KDP Listing Grader</h1>
+      <span className="text-sm text-slate-400">v1 • local only</span>
+    </div>
+  );
+}
+
+const STAGE_RULES = [
+  { name: "Emerging",    min: 0,    max: 5.999,  base: 14 }, // midpoint 10–18
+  { name: "Developing",  min: 6,    max: 11.999, base: 21 }, // midpoint 18–24
+  { name: "Established", min: 12,   max: 23.999, base: 27 }, // midpoint 24–30
+  { name: "Mature",      min: 24,   max: 35.999, base: 33 }, // midpoint 30–36
+  { name: "Legacy",      min: 36,   max: 1200,   base: 40.5 }, // midpoint 36–45
+];
+
+const VERIFICATION_ADJ = {
+  "Screenshots only": -0.15,
+  "Partial verification": -0.07,
+  "Full verification": 0,
+  "Brand asset grade": 0.10,
+};
+
+const STABILITY_ADJ = {
+  "Unstable": -0.10,
+  "Growing": 0,
+  "Consistent": 0.05,
+  "Strong multi-niche": 0.10,
+};
+
+function computeStage(ageMonths){
+  if (ageMonths === undefined || ageMonths === null || ageMonths === "") return "";
+  const a = Number(ageMonths);
+  const match = STAGE_RULES.find(r => a >= r.min && a < r.max);
+  return match ? match.name : "Legacy";
+}
+
+function baseMultiple(stage){
+  const rule = STAGE_RULES.find(r => r.name === stage);
+  return rule ? rule.base : "";
+}
+
+function ValuatorCard(){
+  const [form, setForm] = useState(() => ({
+    url: "",
+    monthlyProfit: "",
+    askingPrice: "",
+    ageMonths: "",
+    verification: "",
+    stability: "",
+    evergreen: false,
+    highReviews: false,
+    heavyAds: false,
+    relianceTop2: false,
+    trendBased: false,
+    nickname: "",
+  }));
+
+  const stage = useMemo(() => computeStage(form.ageMonths), [form.ageMonths]);
+  const base = useMemo(() => baseMultiple(stage), [stage]);
+
+  const adjustments = useMemo(() => {
+    const ver = VERIFICATION_ADJ[form.verification] ?? 0;
+    const stab = STABILITY_ADJ[form.stability] ?? 0;
+    const ev = form.evergreen ? 0.05 : 0;
+    const rev = form.highReviews ? 0.05 : 0;
+    const ads = form.heavyAds ? -0.10 : 0;
+    const rel = form.relianceTop2 ? -0.10 : 0;
+    const trn = form.trendBased ? -0.10 : 0;
+    const sum = ver + stab + ev + rev + ads + rel + trn;
+    return { ver, stab, ev, rev, ads, rel, trn, sum };
+  }, [form]);
+
+  const suggestedMultiple = useMemo(() => {
+    if (!base && base !== 0) return "";
+    return Number(base) * (1 + adjustments.sum);
+  }, [base, adjustments.sum]);
+
+  const fairPrice = useMemo(() => {
+    const mp = Number(form.monthlyProfit || 0);
+    if (!suggestedMultiple || !mp) return "";
+    return suggestedMultiple * mp;
+  }, [suggestedMultiple, form.monthlyProfit]);
+
+  const askingMultiple = useMemo(() => {
+    const ask = Number(form.askingPrice || 0);
+    const mp = Number(form.monthlyProfit || 0);
+    if (!ask || !mp) return "";
+    return ask / mp;
+  }, [form.askingPrice, form.monthlyProfit]);
+
+  const overUnder = useMemo(() => {
+    const ask = Number(form.askingPrice || 0);
+    if (!ask || !fairPrice) return "";
+    return ask / fairPrice - 1;
+  }, [form.askingPrice, fairPrice]);
+
+  const roiMonths = useMemo(() => {
+    const ask = Number(form.askingPrice || 0);
+    const mp = Number(form.monthlyProfit || 0);
+    if (!ask || !mp) return "";
+    return ask / mp; // months to break even
+  }, [form.askingPrice, form.monthlyProfit]);
+
+  const roiBadge = useMemo(() => {
+    if (roiMonths === "") return { label: "—", color: "bg-slate-700" };
+    if (roiMonths < 12) return { label: "Aggressive (<12m)", color: "bg-emerald-600" };
+    if (roiMonths <= 24) return { label: "Balanced (12–24m)", color: "bg-cyan-600" };
+    if (roiMonths <= 36) return { label: "Conservative (24–36m)", color: "bg-amber-600" };
+    return { label: ">36m (Overpriced)", color: "bg-rose-700" };
+  }, [roiMonths]);
+
+  const overUnderBadge = useMemo(() => {
+    if (overUnder === "") return { label: "—", color: "bg-slate-700" };
+    if (overUnder <= -0.15) return { label: "≥15% Under (Deal)", color: "bg-emerald-700" };
+    if (overUnder < 0.15) return { label: "Within ±15%", color: "bg-amber-600" };
+    return { label: ">15% Over", color: "bg-rose-700" };
+  }, [overUnder]);
+
+  const grade = useMemo(() => {
+    // Simple grade based on ROI & Over/Under & risk flags
+    const riskHits = [form.heavyAds, form.relianceTop2, form.trendBased].filter(Boolean).length;
+    const roi = roiMonths === "" ? Infinity : roiMonths;
+    const ou = overUnder === "" ? 0.2 : overUnder; // treat unknown as slightly overpriced
+    let score = 0;
+    if (roi < 12) score += 3; else if (roi <= 24) score += 2; else if (roi <= 36) score += 1;
+    if (ou <= -0.15) score += 2; else if (ou < 0.15) score += 1;
+    score -= riskHits; // penalize per risky flag
+    if (form.verification === "Full verification" || form.verification === "Brand asset grade") score += 1;
+    if (form.stability === "Consistent" || form.stability === "Strong multi-niche") score += 1;
+
+    if (score >= 5) return { letter: "A", color: "bg-emerald-600" };
+    if (score >= 3) return { letter: "B", color: "bg-cyan-700" };
+    if (score >= 1) return { letter: "C", color: "bg-amber-700" };
+    return { letter: "D", color: "bg-rose-700" };
+  }, [roiMonths, overUnder, form]);
+
+  function updateField(k, v){ setForm(prev => ({...prev, [k]: v})); }
+
+  function saveListing(){
+    const raw = localStorage.getItem("kdp-listings") || "[]";
+    const arr = JSON.parse(raw);
+    arr.unshift({
+      id: Date.now(),
+      nickname: form.nickname || (form.url || "Untitled"),
+      url: form.url,
+      ts: new Date().toISOString(),
+      inputs: form,
+      calc: {
+        stage, base, adjustments,
+        suggestedMultiple: numOrNull(suggestedMultiple),
+        fairPrice: numOrNull(fairPrice),
+        askingMultiple: numOrNull(askingMultiple),
+        overUnder: numOrNull(overUnder),
+        roiMonths: numOrNull(roiMonths),
+        grade,
+      }
+    });
+    localStorage.setItem("kdp-listings", JSON.stringify(arr).toString());
+  }
+
+  function resetForm(){
+    setForm({
+      url: "", monthlyProfit: "", askingPrice: "", ageMonths: "", verification: "", stability: "",
+      evergreen: false, highReviews: false, heavyAds: false, relianceTop2: false, trendBased: false, nickname: "",
+    });
+  }
+
+  return (
+    <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 shadow-xl">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <h2 className="text-lg font-semibold">Evaluate a Listing</h2>
+        <span className={`text-xs px-2 py-1 rounded-full ${grade.color}`}>Grade: {grade.letter}</span>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <Input label="Listing URL" placeholder="https://..." value={form.url} onChange={e=>updateField('url', e.target.value)} />
+        <Input label="Nickname (optional)" placeholder="e.g., EF #6123 – Journals" value={form.nickname} onChange={e=>updateField('nickname', e.target.value)} />
+        <NumInput label="Monthly Profit ($)" value={form.monthlyProfit} onChange={v=>updateField('monthlyProfit', v)} />
+        <NumInput label="Asking Price ($)" value={form.askingPrice} onChange={v=>updateField('askingPrice', v)} />
+        <NumInput label="Age (months)" value={form.ageMonths} onChange={v=>updateField('ageMonths', v)} />
+        <Select label="Verification Level" value={form.verification} onChange={v=>updateField('verification', v)} options={["","Screenshots only","Partial verification","Full verification","Brand asset grade"]} />
+        <Select label="Profit Stability" value={form.stability} onChange={v=>updateField('stability', v)} options={["","Unstable","Growing","Consistent","Strong multi-niche"]} />
+      </div>
+
+      <div className="mt-4 grid md:grid-cols-5 gap-3">
+        <Toggle label="Evergreen" checked={form.evergreen} onChange={v=>updateField('evergreen', v)} />
+        <Toggle label="High Reviews (4.5+)" checked={form.highReviews} onChange={v=>updateField('highReviews', v)} />
+        <Toggle label="Heavy Ads" checked={form.heavyAds} onChange={v=>updateField('heavyAds', v)} />
+        <Toggle label="Reliant on 1–2 Titles" checked={form.relianceTop2} onChange={v=>updateField('relianceTop2', v)} />
+        <Toggle label="Trend-Based" checked={form.trendBased} onChange={v=>updateField('trendBased', v)} />
+      </div>
+
+      <div className="mt-6 grid md:grid-cols-3 gap-4">
+        <Stat title="Stage" value={stage || '—'} subtitle={`Base ×${base || '—'}`} />
+        <Stat title="Suggested Multiple" value={fmt1(suggestedMultiple)} subtitle="After adjustments" />
+        <Stat title="Fair Price" value={fmt$(fairPrice)} subtitle="Model price" />
+        <Stat title="Asking Multiple" value={fmt1(askingMultiple)} subtitle="Ask ÷ Profit" />
+        <Stat title="Over / Under" value={overUnder === "" ? '—' : (overUnder*100).toFixed(1) + '%'} subtitleClass={overUnderBadge.color} subtitle={overUnderBadge.label} />
+        <Stat title="ROI (months)" value={roiMonths === "" ? '—' : Math.round(roiMonths)} subtitleClass={roiBadge.color} subtitle={roiBadge.label} />
+      </div>
+
+      <div className="mt-6 flex flex-wrap gap-3">
+        <button onClick={saveListing} className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 transition">Save to Compare</button>
+        <button onClick={resetForm} className="px-4 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 transition">Reset</button>
+        {form.url && <a href={form.url} target="_blank" className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 transition">Open Listing</a>}
+      </div>
+    </div>
+  );
+}
+
+function SavedComparisons(){
+  const [items, setItems] = useState([]);
+  useEffect(()=>{
+    try {
+      const raw = localStorage.getItem("kdp-listings") || "[]";
+      setItems(JSON.parse(raw));
+    } catch (e) { setItems([]); }
+  }, []);
+
+  function remove(id){
+    const next = items.filter(i=>i.id!==id);
+    setItems(next);
+    localStorage.setItem("kdp-listings", JSON.stringify(next));
+  }
+
+  const total = items.length;
+
+  return (
+    <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 shadow-xl">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-semibold">Saved Comparisons</h3>
+        <span className="text-xs text-slate-400">{total}</span>
+      </div>
+      {total===0 && <p className="text-sm text-slate-400">Nothing saved yet. Add a listing on the left.</p>}
+      <div className="space-y-3">
+        {items.map(i=> (
+          <div key={i.id} className="p-3 rounded-xl bg-slate-800/70 border border-slate-700">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-medium truncate">{i.nickname}</div>
+                {i.url && <a href={i.url} target="_blank" className="text-xs text-indigo-300 hover:underline break-all">{i.url}</a>}
+              </div>
+              <span className={`text-xs px-2 py-1 rounded-full ${i.calc.grade.color}`}>Grade {i.calc.grade.letter}</span>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-300">
+              <div>Stage: <b>{i.calc.stage||'—'}</b></div>
+              <div>Base ×: <b>{fmt1(i.calc.base)}</b></div>
+              <div>Suggested ×: <b>{fmt1(i.calc.suggestedMultiple)}</b></div>
+              <div>Fair Price: <b>{fmt$(i.calc.fairPrice)}</b></div>
+              <div>Ask ×: <b>{fmt1(i.calc.askingMultiple)}</b></div>
+              <div>Over/Under: <b>{i.calc.overUnder==null? '—' : (i.calc.overUnder*100).toFixed(1)+ '%'}</b></div>
+              <div>ROI: <b>{i.calc.roiMonths==null? '—' : Math.round(i.calc.roiMonths)} mo</b></div>
+            </div>
+            <div className="mt-2 flex justify-end">
+              <button onClick={()=>remove(i.id)} className="text-xs px-3 py-1 rounded-lg bg-slate-700 hover:bg-slate-600">Remove</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {total>0 && (
+        <div className="mt-4 text-right">
+          <button onClick={()=>{localStorage.removeItem('kdp-listings'); setItems([]);}} className="text-xs px-3 py-1 rounded-lg bg-rose-700 hover:bg-rose-600">Clear All</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Footer(){
+  return (
+    <div className="mt-10 text-center text-xs text-slate-500">
+      <p>Modeled on your KDP valuation scale • No scraping; paste numbers you trust.</p>
+    </div>
+  );
+}
+
+function Input({label, value, onChange, placeholder}){
+  return (
+    <label className="block">
+      <div className="text-xs mb-1 text-slate-300">{label}</div>
+      <input value={value} onChange={onChange} placeholder={placeholder}
+             className="w-full rounded-xl bg-slate-800 border border-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+    </label>
+  );
+}
+
+function NumInput({label, value, onChange}){
+  return (
+    <label className="block">
+      <div className="text-xs mb-1 text-slate-300">{label}</div>
+      <input value={value}
+             onChange={(e)=> onChange(e.target.value.replace(/[^0-9.]/g, ''))}
+             inputMode="decimal"
+             className="w-full rounded-xl bg-slate-800 border border-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+    </label>
+  );
+}
+
+function TextArea({label, value, onChange, placeholder}){
+  return (
+    <label className="block mt-4">
+      <div className="text-xs mb-1 text-slate-300">{label}</div>
+      <textarea value={value} onChange={onChange} placeholder={placeholder}
+                rows={4}
+                className="w-full rounded-xl bg-slate-800 border border-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+    </label>
+  );
+}
+
+function Select({label, value, onChange, options}){
+  return (
+    <label className="block">
+      <div className="text-xs mb-1 text-slate-300">{label}</div>
+      <select value={value} onChange={(e)=>onChange(e.target.value)}
+              className="w-full rounded-xl bg-slate-800 border border-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        {options.map(o=> <option key={o} value={o}>{o||'—'}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function Toggle({label, checked, onChange}){
+  return (
+    <label className="flex items-center gap-2">
+      <input type="checkbox" checked={checked} onChange={(e)=>onChange(e.target.checked)} />
+      <span className="text-sm">{label}</span>
+    </label>
+  );
+}
+
+function Stat({title, value, subtitle, subtitleClass}){
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+      <div className="text-xs text-slate-400">{title}</div>
+      <div className="text-xl font-semibold">{value}</div>
+      {subtitle !== undefined && (
+        <div className={`mt-1 inline-block text-[11px] px-2 py-0.5 rounded-full ${subtitleClass||'bg-slate-700'}`}>{subtitle}</div>
+      )}
+    </div>
+  );
+}
+
+function numOrNull(x){
+  if (x === "" || x === null || x === undefined || Number.isNaN(Number(x))) return null;
+  return Number(x);
+}
+
+function fmt$(n){
+  if (n === "" || n === null || n === undefined) return "—";
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(Number(n));
+}
+
+function fmt1(n){
+  if (n === "" || n === null || n === undefined) return "—";
+  return Number(n).toFixed(1);
+}
